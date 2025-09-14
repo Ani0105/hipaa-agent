@@ -1,24 +1,59 @@
+# --- Fix sqlite version for Chroma on some hosts (e.g., Streamlit Cloud) ---
+# Must run BEFORE importing chromadb/langchain_community.vectorstores
+try:
+    import sys, pysqlite3  # provided by pysqlite3-binary
+    sys.modules["sqlite3"] = pysqlite3
+    sys.modules["sqlite3.dbapi2"] = pysqlite3.dbapi2
+except Exception:
+    pass
+# ---------------------------------------------------------------------------
+
+import os
+import base64
 import streamlit as st
+from dotenv import load_dotenv
+
+# LangChain / Vector store / LLM
 from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.chains import RetrievalQA
 from langchain_groq import ChatGroq
-from dotenv import load_dotenv
-import base64, os
-import time
 
 # --------------------------------------------
-# 1. Load environment + set dark background
+# 1) Env + caching + page setup
 # --------------------------------------------
 load_dotenv()
+
+# Cache HF models on disk so cold starts don’t re-download every time
+HF_CACHE = os.path.join(os.getcwd(), ".hf_cache")
+os.environ.setdefault("HF_HOME", HF_CACHE)
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", HF_CACHE)
+os.makedirs(HF_CACHE, exist_ok=True)
+
 st.set_page_config(page_title="HIPAA Q&A Agent", page_icon="🛡️", layout="centered")
 
-# Background image setup
+# Allow Streamlit Secrets to populate env (Cloud)
+try:
+    if "GROQ_API_KEY" in st.secrets:
+        os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
+    if "GROQ_MODEL" in st.secrets:
+        os.environ["GROQ_MODEL"] = st.secrets["GROQ_MODEL"]
+except Exception:
+    pass
+
+# If the persisted DB doesn't exist yet, build it once from ./data
+if not os.path.exists("chroma_db") or not os.listdir("chroma_db"):
+    from build_embeddings import main as build_main
+    build_main()
+
+# --------------------------------------------
+# 2) Background styling (optional)
+# --------------------------------------------
 BG_FILE = "dark_bg.png"
 
 def set_dark_background(img_path: str):
     if not os.path.exists(img_path):
-        return  # skip if image not present
+        return
     with open(img_path, "rb") as f:
         data = base64.b64encode(f.read()).decode()
     st.markdown(f"""
@@ -42,7 +77,6 @@ def set_dark_background(img_path: str):
         .glass-subtext {{ color: #bbbbbb; margin-bottom:1.4rem; text-align:center; }}
         .suggestions ul {{ margin-left:1.4rem; }}
         .suggestions li {{ margin-bottom: 0.6rem; }}
-
         .marquee {{
             width: 100%;
             overflow: hidden;
@@ -64,7 +98,6 @@ def set_dark_background(img_path: str):
             0% {{ transform: translate(0, 0); }}
             100% {{ transform: translate(-100%, 0); }}
         }}
-
         .lds-dual-ring {{
             display: inline-block;
             width: 32px;
@@ -80,15 +113,11 @@ def set_dark_background(img_path: str):
             border-color: #00e0ff transparent #00e0ff transparent;
             animation: lds-dual-ring 1.2s linear infinite;
         }}
-
-        .flash {{
-            animation: flash-glow 1s ease-out;
-        }}
+        .flash {{ animation: flash-glow 1s ease-out; }}
         @keyframes flash-glow {{
             from {{ filter: brightness(2.5); }}
-            to {{ filter: brightness(1); }}
+            to   {{ filter: brightness(1); }}
         }}
-
         [data-testid="stChatMessage"]:has(div[data-testid="stMarkdownContainer"]) div.stMarkdown,
         [data-testid="stChatMessage"]:has(div[data-testid="stMarkdownContainer"]) p {{
             color: #ffffff !important;
@@ -101,52 +130,38 @@ def set_dark_background(img_path: str):
     """, unsafe_allow_html=True)
 
 set_dark_background(BG_FILE)
-# Make Streamlit Secrets available as env vars when on Cloud
-try:
-    if "GROQ_API_KEY" in st.secrets: os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
-    if "GROQ_MODEL" in st.secrets: os.environ["GROQ_MODEL"] = st.secrets["GROQ_MODEL"]
-except Exception:
-    pass
-
-# Build vector DB on first run if missing (Chroma)
-if not os.path.exists("chroma_db") or not os.listdir("chroma_db"):
-    from build_embeddings import main as build_main
-    build_main()
 
 # --------------------------------------------
-# 2. Load QA Chain
+# 3) QA chain (cached)
 # --------------------------------------------
 @st.cache_resource
 def get_qa_chain():
-    # Embeddings & vector store
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     vs = Chroma(persist_directory="chroma_db", embedding_function=embeddings)
     retriever = vs.as_retriever()
 
-    # LLM (Groq) – reads from .env
-    model_id = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
-    llm = ChatGroq(model=model_id, groq_api_key=os.getenv("GROQ_API_KEY"))
+    llm = ChatGroq(
+        model=os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"),
+        groq_api_key=os.getenv("GROQ_API_KEY"),
+    )
 
     return RetrievalQA.from_chain_type(
         llm=llm,
         retriever=retriever,
-        return_source_documents=True
+        return_source_documents=True,
     )
 
 qa_chain = get_qa_chain()
 
 # --------------------------------------------
-# 3. UI Rendering
+# 4) UI
 # --------------------------------------------
-
-# Marquee strip
 st.markdown("""
 <div class="marquee"><span>
 📘 HIPAA = Health Insurance Portability and Accountability Act 🛡️ | It protects your private health info 🧠 | Think of it as a healthcare privacy shield 🏥🔐📜 | Your records, your rights, your rules!
 </span></div>
 """, unsafe_allow_html=True)
 
-# Floating Glass Card
 with st.container():
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.markdown("<h1 style='text-align:center;'>🛡️ HIPAA Compliance Q&A Agent</h1>", unsafe_allow_html=True)
