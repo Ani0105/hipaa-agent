@@ -1,12 +1,10 @@
-streamlit
-python-dotenv
+streamlit==1.49.1
+python-dotenv==1.1.1
 langchain==0.3.27
 langchain-community==0.3.29
 langchain-groq==0.3.8
 langchain-huggingface==0.3.1
+faiss-cpu==1.12.0
 sentence-transformers==5.1.0
-chromadb==1.0.21
-pypdf
+pypdf==6.0.0
 groq==0.31.1
-pysqlite3-binary==0.5.3.post3
-faiss-cpu; sys_platform != "win32"
