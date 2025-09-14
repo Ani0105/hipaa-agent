@@ -1,30 +1,26 @@
-# --- Fix sqlite version for Chroma on some hosts (e.g., Streamlit Cloud) ---
-# Must run BEFORE importing chromadb/langchain_community.vectorstores
+# --- Prefer a modern sqlite for Chroma on hosts like Streamlit Cloud ----------
+# Must run BEFORE importing anything that may import `chromadb`
 try:
-    import sys, pysqlite3  # provided by pysqlite3-binary
+    import sys, pysqlite3  # from pysqlite3-binary
     sys.modules["sqlite3"] = pysqlite3
     sys.modules["sqlite3.dbapi2"] = pysqlite3.dbapi2
 except Exception:
     pass
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
 import os
 import base64
 import streamlit as st
 from dotenv import load_dotenv
 
-# LangChain / Vector store / LLM
-from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.chains import RetrievalQA
 from langchain_groq import ChatGroq
 
-# --------------------------------------------
-# 1) Env + caching + page setup
-# --------------------------------------------
+# 1) ENV + CACHES -------------------------------------------------------------
 load_dotenv()
 
-# Cache HF models on disk so cold starts don’t re-download every time
+# HF model cache to reduce 429s and cold starts
 HF_CACHE = os.path.join(os.getcwd(), ".hf_cache")
 os.environ.setdefault("HF_HOME", HF_CACHE)
 os.environ.setdefault("HUGGINGFACE_HUB_CACHE", HF_CACHE)
@@ -32,23 +28,23 @@ os.makedirs(HF_CACHE, exist_ok=True)
 
 st.set_page_config(page_title="HIPAA Q&A Agent", page_icon="🛡️", layout="centered")
 
-# Allow Streamlit Secrets to populate env (Cloud)
+# Mirror Streamlit Secrets → env (for Cloud)
 try:
     if "GROQ_API_KEY" in st.secrets:
         os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
     if "GROQ_MODEL" in st.secrets:
         os.environ["GROQ_MODEL"] = st.secrets["GROQ_MODEL"]
+    if "HUGGINGFACE_HUB_TOKEN" in st.secrets:
+        os.environ["HUGGINGFACE_HUB_TOKEN"] = st.secrets["HUGGINGFACE_HUB_TOKEN"]
 except Exception:
     pass
 
-# If the persisted DB doesn't exist yet, build it once from ./data
-if not os.path.exists("chroma_db") or not os.listdir("chroma_db"):
+# Build a vector DB if none exists yet (Chroma on most hosts; FAISS fallback)
+if (not os.path.isdir("chroma_db") or not os.listdir("chroma_db")) and not os.path.isdir("vector_db"):
     from build_embeddings import main as build_main
     build_main()
 
-# --------------------------------------------
-# 2) Background styling (optional)
-# --------------------------------------------
+# 2) THEME / BG (optional) ----------------------------------------------------
 BG_FILE = "dark_bg.png"
 
 def set_dark_background(img_path: str):
@@ -60,102 +56,82 @@ def set_dark_background(img_path: str):
         <style>
         .stApp {{
             background: url("data:image/png;base64,{data}") center/cover fixed no-repeat;
-            color: #f0f0f0;
-            font-family: 'Segoe UI', sans-serif;
+            color: #f0f0f0; font-family: 'Segoe UI', sans-serif;
         }}
         .glass-card {{
             background: rgba(20, 20, 20, 0.65);
             backdrop-filter: blur(12px) saturate(120%);
             -webkit-backdrop-filter: blur(12px) saturate(120%);
             border: 1px solid rgba(255,255,255,0.05);
-            border-radius: 18px;
-            padding: 2rem;
-            box-shadow: 0 10px 40px rgba(0,0,0,.6);
-            margin-top: 4rem;
+            border-radius: 18px; padding: 2rem;
+            box-shadow: 0 10px 40px rgba(0,0,0,.6); margin-top: 4rem;
         }}
         h1, h2, h4 {{ color: #ffffff; }}
         .glass-subtext {{ color: #bbbbbb; margin-bottom:1.4rem; text-align:center; }}
         .suggestions ul {{ margin-left:1.4rem; }}
         .suggestions li {{ margin-bottom: 0.6rem; }}
-        .marquee {{
-            width: 100%;
-            overflow: hidden;
-            white-space: nowrap;
-            box-sizing: border-box;
-            color: #00ffff;
-            font-weight: 500;
-            background: rgba(0,0,0,0.4);
-            padding: 10px 0;
-            font-size: 15px;
-            border-bottom: 1px solid #333;
-        }}
-        .marquee span {{
-            display: inline-block;
-            padding-left: 100%;
-            animation: marquee 22s linear infinite;
-        }}
-        @keyframes marquee {{
-            0% {{ transform: translate(0, 0); }}
-            100% {{ transform: translate(-100%, 0); }}
-        }}
-        .lds-dual-ring {{
-            display: inline-block;
-            width: 32px;
-            height: 32px;
-        }}
-        .lds-dual-ring:after {{
-            content: " ";
-            display: block;
-            width: 32px;
-            height: 32px;
-            border-radius: 50%;
-            border: 4px solid #00e0ff;
-            border-color: #00e0ff transparent #00e0ff transparent;
-            animation: lds-dual-ring 1.2s linear infinite;
-        }}
+        .marquee {{ width:100%; overflow:hidden; white-space:nowrap;
+            color:#00ffff; font-weight:500; background:rgba(0,0,0,0.4);
+            padding:10px 0; font-size:15px; border-bottom:1px solid #333; }}
+        .marquee span {{ display:inline-block; padding-left:100%;
+            animation: marquee 22s linear infinite; }}
+        @keyframes marquee {{ 0% {{ transform:translate(0,0); }}
+                              100% {{ transform:translate(-100%,0); }} }}
+        .lds-dual-ring {{ display:inline-block; width:32px; height:32px; }}
+        .lds-dual-ring:after {{ content:" "; display:block; width:32px; height:32px;
+            border-radius:50%; border:4px solid #00e0ff;
+            border-color:#00e0ff transparent #00e0ff transparent;
+            animation: lds-dual-ring 1.2s linear infinite; }}
         .flash {{ animation: flash-glow 1s ease-out; }}
-        @keyframes flash-glow {{
-            from {{ filter: brightness(2.5); }}
-            to   {{ filter: brightness(1); }}
-        }}
+        @keyframes flash-glow {{ from {{ filter:brightness(2.5); }} to {{ filter:brightness(1); }} }}
         [data-testid="stChatMessage"]:has(div[data-testid="stMarkdownContainer"]) div.stMarkdown,
-        [data-testid="stChatMessage"]:has(div[data-testid="stMarkdownContainer"]) p {{
-            color: #ffffff !important;
-        }}
+        [data-testid="stChatMessage"]:has(div[data-testid="stMarkdownContainer"]) p {{ color:#ffffff !important; }}
         [data-testid="stChatMessage"][data-source="user"] div.stMarkdown,
-        [data-testid="stChatMessage"][data-source="user"] p {{
-            color: #000000 !important;
-        }}
+        [data-testid="stChatMessage"][data-source="user"] p {{ color:#000000 !important; }}
         </style>
     """, unsafe_allow_html=True)
 
 set_dark_background(BG_FILE)
 
-# --------------------------------------------
-# 3) QA chain (cached)
-# --------------------------------------------
+# 3) LOAD VECTOR STORE (Chroma preferred, FAISS fallback) ---------------------
+def load_vectorstore(embeddings):
+    # Prefer Chroma if folder exists AND chroma import works
+    if os.path.isdir("chroma_db") and os.listdir("chroma_db"):
+        try:
+            from langchain_community.vectorstores import Chroma
+            vs = Chroma(persist_directory="chroma_db", embedding_function=embeddings)
+            return vs, "chroma"
+        except Exception:
+            pass  # fall through to FAISS
+
+    # FAISS fallback (requires faiss-cpu on non-Windows in requirements)
+    if os.path.isdir("vector_db"):
+        from langchain_community.vectorstores import FAISS
+        vs = FAISS.load_local("vector_db", embeddings, allow_dangerous_deserialization=True)
+        return vs, "faiss"
+
+    # Nothing built for some reason
+    raise RuntimeError("No vector store found. Please run build_embeddings.py.")
+
 @st.cache_resource
 def get_qa_chain():
     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-    vs = Chroma(persist_directory="chroma_db", embedding_function=embeddings)
-    retriever = vs.as_retriever()
+    vs, store = load_vectorstore(embeddings)
 
     llm = ChatGroq(
         model=os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"),
         groq_api_key=os.getenv("GROQ_API_KEY"),
     )
 
-    return RetrievalQA.from_chain_type(
-        llm=llm,
-        retriever=retriever,
-        return_source_documents=True,
+    chain = RetrievalQA.from_chain_type(
+        llm=llm, retriever=vs.as_retriever(), return_source_documents=True
     )
+    st.caption(f"Vector store: {store}")
+    return chain
 
 qa_chain = get_qa_chain()
 
-# --------------------------------------------
-# 4) UI
-# --------------------------------------------
+# 4) UI -----------------------------------------------------------------------
 st.markdown("""
 <div class="marquee"><span>
 📘 HIPAA = Health Insurance Portability and Accountability Act 🛡️ | It protects your private health info 🧠 | Think of it as a healthcare privacy shield 🏥🔐📜 | Your records, your rights, your rules!
@@ -193,36 +169,3 @@ with st.container():
         <li>🩺 <strong>General Understanding</strong>
             <ul>
                 <li>What is HIPAA and why was it created?</li>
-                <li>Who needs to follow HIPAA rules?</li>
-            </ul>
-        </li>
-        <li>🔐 <strong>Privacy Rules</strong>
-            <ul>
-                <li>What is considered private under HIPAA?</li>
-                <li>Can a doctor talk about my condition with other patients around?</li>
-            </ul>
-        </li>
-        <li>📤 <strong>Data Sharing</strong>
-            <ul>
-                <li>Can a hospital send my records to an insurance company?</li>
-                <li>Do I have to give permission before my health info is shared?</li>
-            </ul>
-        </li>
-        <li>👩‍⚕️ <strong>Everyday Situations</strong>
-            <ul>
-                <li>Can a nurse discuss my case in a hallway?</li>
-                <li>Can a receptionist call out my full name in a waiting room?</li>
-            </ul>
-        </li>
-        <li>🚨 <strong>HIPAA Violations</strong>
-            <ul>
-                <li>What happens if someone breaks HIPAA rules?</li>
-                <li>How do I report a HIPAA violation?</li>
-            </ul>
-        </li>
-    </ul>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown("<div style='margin-top:2rem; text-align:center; font-size:14px;'>🤖 Developed by an AI-agent enthusiast passionate about privacy, compliance, and intelligent automation.</div>", unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
