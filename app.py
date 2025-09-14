@@ -1,126 +1,156 @@
 import streamlit as st
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
+from langchain_community.vectorstores import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.chains import RetrievalQA
 from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 import base64, os
+import time
 
-# ─────────────────────────────────────────────
-# 1. Load .env and set dark theme background
-# ─────────────────────────────────────────────
+# --------------------------------------------
+# 1. Load environment + set dark background
+# --------------------------------------------
 load_dotenv()
 st.set_page_config(page_title="HIPAA Q&A Agent", page_icon="🛡️", layout="centered")
+
+# Background image setup
 BG_FILE = "dark_bg.png"
 
 def set_dark_background(img_path: str):
+    if not os.path.exists(img_path):
+        return  # skip if image not present
     with open(img_path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode()
+        data = base64.b64encode(f.read()).decode()
     st.markdown(f"""
-    <style>
-    .stApp {{
-        background: url("data:image/png;base64,{b64}") center/cover fixed no-repeat;
-        color: #f0f0f0;
-        font-family: 'Segoe UI', sans-serif;
-    }}
-    .glass-card {{
-        background: rgba(20, 20, 20, 0.65);
-        backdrop-filter: blur(12px) saturate(120%);
-        border: 1px solid rgba(255,255,255,0.05);
-        border-radius: 18px;
-        padding: 2rem;
-        box-shadow: 0 10px 40px rgba(0,0,0,.6);
-        margin-top: 4rem;
-    }}
-    h1, h2, h4 {{ color: #ffffff; }}
-    .glass-subtext {{ color: #bbbbbb; margin-bottom:1.4rem; text-align:center; }}
-    .suggestions ul {{ margin-left:1.4rem; }}
-    .suggestions li {{ margin-bottom: 0.6rem; }}
-    .marquee {{
-        width: 100%;
-        overflow: hidden;
-        white-space: nowrap;
-        color: #00ffff;
-        background: rgba(0,0,0,0.4);
-        padding: 10px 0;
-        font-size: 15px;
-        border-bottom: 1px solid #333;
-    }}
-    .marquee span {{
-        display: inline-block;
-        padding-left: 100%;
-        animation: marquee 22s linear infinite;
-    }}
-    @keyframes marquee {{
-        0% {{ transform: translate(0, 0); }}
-        100% {{ transform: translate(-100%, 0); }}
-    }}
-    .lds-dual-ring {{
-        display: inline-block;
-        width: 32px;
-        height: 32px;
-    }}
-    .lds-dual-ring:after {{
-        content: " ";
-        display: block;
-        width: 32px;
-        height: 32px;
-        border-radius: 50%;
-        border: 4px solid #00e0ff;
-        border-color: #00e0ff transparent #00e0ff transparent;
-        animation: lds-dual-ring 1.2s linear infinite;
-    }}
-    </style>
+        <style>
+        .stApp {{
+            background: url("data:image/png;base64,{data}") center/cover fixed no-repeat;
+            color: #f0f0f0;
+            font-family: 'Segoe UI', sans-serif;
+        }}
+        .glass-card {{
+            background: rgba(20, 20, 20, 0.65);
+            backdrop-filter: blur(12px) saturate(120%);
+            -webkit-backdrop-filter: blur(12px) saturate(120%);
+            border: 1px solid rgba(255,255,255,0.05);
+            border-radius: 18px;
+            padding: 2rem;
+            box-shadow: 0 10px 40px rgba(0,0,0,.6);
+            margin-top: 4rem;
+        }}
+        h1, h2, h4 {{ color: #ffffff; }}
+        .glass-subtext {{ color: #bbbbbb; margin-bottom:1.4rem; text-align:center; }}
+        .suggestions ul {{ margin-left:1.4rem; }}
+        .suggestions li {{ margin-bottom: 0.6rem; }}
+
+        .marquee {{
+            width: 100%;
+            overflow: hidden;
+            white-space: nowrap;
+            box-sizing: border-box;
+            color: #00ffff;
+            font-weight: 500;
+            background: rgba(0,0,0,0.4);
+            padding: 10px 0;
+            font-size: 15px;
+            border-bottom: 1px solid #333;
+        }}
+        .marquee span {{
+            display: inline-block;
+            padding-left: 100%;
+            animation: marquee 22s linear infinite;
+        }}
+        @keyframes marquee {{
+            0% {{ transform: translate(0, 0); }}
+            100% {{ transform: translate(-100%, 0); }}
+        }}
+
+        .lds-dual-ring {{
+            display: inline-block;
+            width: 32px;
+            height: 32px;
+        }}
+        .lds-dual-ring:after {{
+            content: " ";
+            display: block;
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            border: 4px solid #00e0ff;
+            border-color: #00e0ff transparent #00e0ff transparent;
+            animation: lds-dual-ring 1.2s linear infinite;
+        }}
+
+        .flash {{
+            animation: flash-glow 1s ease-out;
+        }}
+        @keyframes flash-glow {{
+            from {{ filter: brightness(2.5); }}
+            to {{ filter: brightness(1); }}
+        }}
+
+        [data-testid="stChatMessage"]:has(div[data-testid="stMarkdownContainer"]) div.stMarkdown,
+        [data-testid="stChatMessage"]:has(div[data-testid="stMarkdownContainer"]) p {{
+            color: #ffffff !important;
+        }}
+        [data-testid="stChatMessage"][data-source="user"] div.stMarkdown,
+        [data-testid="stChatMessage"][data-source="user"] p {{
+            color: #000000 !important;
+        }}
+        </style>
     """, unsafe_allow_html=True)
 
 set_dark_background(BG_FILE)
+# Make Streamlit Secrets available as env vars when on Cloud
+try:
+    if "GROQ_API_KEY" in st.secrets: os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
+    if "GROQ_MODEL" in st.secrets: os.environ["GROQ_MODEL"] = st.secrets["GROQ_MODEL"]
+except Exception:
+    pass
 
-# ─────────────────────────────────────────────
-# 2. Build vector DB from /data folder (dynamic)
-# ─────────────────────────────────────────────
-@st.cache_resource
-def build_vector_db():
-    from langchain_community.document_loaders import TextLoader, PyPDFLoader
-    from langchain.text_splitter import RecursiveCharacterTextSplitter
+# Build vector DB on first run if missing (Chroma)
+if not os.path.exists("chroma_db") or not os.listdir("chroma_db"):
+    from build_embeddings import main as build_main
+    build_main()
 
-    docs = []
-    for fname in os.listdir("data"):
-        path = os.path.join("data", fname)
-        if fname.lower().endswith(".pdf"):
-            docs.extend(PyPDFLoader(path).load())
-        elif fname.lower().endswith((".txt", ".md")):
-            docs.extend(TextLoader(path, encoding="utf-8").load())
-
-    if not docs:
-        raise FileNotFoundError("📂 No files in 'data/' folder. Please add HIPAA PDFs or text files.")
-
-    chunks = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100).split_documents(docs)
-    return FAISS.from_documents(chunks, HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2"))
-
-# ─────────────────────────────────────────────
-# 3. Create QA Chain
-# ─────────────────────────────────────────────
+# --------------------------------------------
+# 2. Load QA Chain
+# --------------------------------------------
 @st.cache_resource
 def get_qa_chain():
-    retriever = build_vector_db().as_retriever()
-    llm = ChatGroq(model="llama3-8b-8192", groq_api_key=os.getenv("GROQ_API_KEY"))
-    return RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
+    # Embeddings & vector store
+    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    vs = Chroma(persist_directory="chroma_db", embedding_function=embeddings)
+    retriever = vs.as_retriever()
+
+    # LLM (Groq) – reads from .env
+    model_id = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+    llm = ChatGroq(model=model_id, groq_api_key=os.getenv("GROQ_API_KEY"))
+
+    return RetrievalQA.from_chain_type(
+        llm=llm,
+        retriever=retriever,
+        return_source_documents=True
+    )
 
 qa_chain = get_qa_chain()
 
-# ─────────────────────────────────────────────
-# 4. UI
-# ─────────────────────────────────────────────
+# --------------------------------------------
+# 3. UI Rendering
+# --------------------------------------------
+
+# Marquee strip
 st.markdown("""
 <div class="marquee"><span>
-📘 HIPAA = Health Insurance Portability and Accountability Act 🛡️ | It protects your private health info 🧠 | Your records, your rights, your rules!
+📘 HIPAA = Health Insurance Portability and Accountability Act 🛡️ | It protects your private health info 🧠 | Think of it as a healthcare privacy shield 🏥🔐📜 | Your records, your rights, your rules!
 </span></div>
 """, unsafe_allow_html=True)
 
+# Floating Glass Card
 with st.container():
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.markdown("<h1 style='text-align:center;'>🛡️ HIPAA Compliance Q&A Agent</h1>", unsafe_allow_html=True)
-    st.markdown("<div class='glass-subtext'>Built by <strong>Anii Daa</strong> — ask anything about HIPAA compliance!</div>", unsafe_allow_html=True)
+    st.markdown("<div class='glass-subtext'>Hey! I'm <strong>Anii Daa’s</strong> custom-built AI agent. Ask me anything about HIPAA!</div>", unsafe_allow_html=True)
 
     if "history" not in st.session_state:
         st.session_state.history = []
@@ -131,6 +161,7 @@ with st.container():
         with st.spinner("<div class='lds-dual-ring'></div>"):
             out = qa_chain(user_q)
         st.session_state.history.append((user_q, out["result"], out["source_documents"]))
+        st.markdown("<script>document.body.classList.add('flash'); setTimeout(()=>document.body.classList.remove('flash'), 1200);</script>", unsafe_allow_html=True)
 
     for q, a, docs in st.session_state.history:
         st.chat_message("user").write(q)
@@ -178,6 +209,5 @@ with st.container():
     </div>
     """, unsafe_allow_html=True)
 
-
-    st.markdown("<div style='margin-top:2rem; text-align:center; font-size:14px;'>🤖 Crafted with love for clarity and compliance.</div>", unsafe_allow_html=True)
+    st.markdown("<div style='margin-top:2rem; text-align:center; font-size:14px;'>🤖 Developed by an AI-agent enthusiast passionate about privacy, compliance, and intelligent automation.</div>", unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
